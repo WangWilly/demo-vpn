@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VPN 是怎麼實現的？</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #0f172a; color: #e2e8f0; }
+        .packet-transition { transition: all 1s ease-in-out; }
+        .tunnel-line { stroke-dasharray: 10; animation: dash 20s linear infinite; }
+        @keyframes dash { to { stroke-dashoffset: -1000; } }
+        /* 自定義滾動條 */
+        ::-webkit-scrollbar { height: 8px; width: 8px; }
+        ::-webkit-scrollbar-track { background: #1e293b; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- Icon Components (Inline SVGs) ---
+        const UserIcon = () => <svg className="w-10 h-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>;
+        const ISPIcon = () => <svg className="w-10 h-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>;
+        const HackerIcon = () => <svg className="w-10 h-10 text-red-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>;
+        const VPNIcon = () => <svg className="w-10 h-10 text-green-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>;
+        const TargetIcon = () => <svg className="w-10 h-10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>;
+        const FileIcon = () => <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>;
+        const LockIcon = () => <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>;
+
+        const App = () => {
+            const [isVpnOn, setIsVpnOn] = useState(false);
+            const [isSending, setIsSending] = useState(false);
+            const [packetState, setPacketState] = useState({
+                visible: false,
+                position: 5, // percentage left
+                isEncrypted: false,
+                ip: '114.32.X.X (你的真實IP)'
+            });
+            const [logs, setLogs] = useState([]);
+
+            const addLog = (msg, type = 'info') => {
+                setLogs(prev => [...prev, { time: new Date().toLocaleTimeString(), msg, type }]);
+            };
+
+            const toggleVpn = () => {
+                if (isSending) return;
+                setIsVpnOn(!isVpnOn);
+                setLogs([]); // Clear logs on switch
+                addLog(`VPN 已${!isVpnOn ? '開啟' : '關閉'}`, !isVpnOn ? 'success' : 'warning');
+            };
+
+            const sendData = () => {
+                if (isSending) return;
+                setIsSending(true);
+                setLogs([]);
+                addLog("開始傳輸數據...", "info");
+
+                // Initial State
+                setPacketState({
+                    visible: true,
+                    position: 8, // User node
+                    isEncrypted: isVpnOn, // Encrypt immediately at device if VPN is on
+                    ip: '114.32.X.X (你的真實IP)'
+                });
+
+                if (isVpnOn) {
+                    addLog("數據已在你的設備上被【加密】 (AES-256)", "success");
+                } else {
+                    addLog("數據以【明文】形式從設備發出", "warning");
+                }
+
+                // Sequence
+                setTimeout(() => {
+                    // Move to ISP
+                    setPacketState(prev => ({ ...prev, position: 33 }));
+                    addLog("數據抵達 ISP (網際網路服務提供商)。");
+                    if (!isVpnOn) {
+                        addLog("❌ 警告：ISP 可以輕易讀取你的明文數據和瀏覽紀錄！", "error");
+                    } else {
+                        addLog("✅ 安全：ISP 只能看到加密亂碼，無法得知內容。", "success");
+                    }
+                }, 1500);
+
+                setTimeout(() => {
+                    // Move to VPN or Internet
+                    setPacketState(prev => ({ ...prev, position: 63 }));
+                    if (isVpnOn) {
+                        addLog("數據抵達 VPN 伺服器 (位於美國)。");
+                        addLog("VPN 伺服器將數據【解密】，並將來源 IP 替換為 VPN 的 IP。", "info");
+                        setPacketState(prev => ({
+                            ...prev,
+                            isEncrypted: false, // Decrypted for the final stretch (assuming HTTPS handles the rest in reality, but for VPN concept, the tunnel ends here)
+                            ip: '198.51.X.X (VPN伺服器IP)'
+                        }));
+                    } else {
+                        addLog("數據在公共網路上傳輸 (可能遭遇駭客監聽)。");
+                        addLog("❌ 警告：駭客攔截到明文密碼！", "error");
+                    }
+                }, 3500);
+
+                setTimeout(() => {
+                    // Move to Target
+                    setPacketState(prev => ({ ...prev, position: 88 }));
+                    addLog("數據抵達目標網站 (例如：銀行或影音平台)。");
+                    if (isVpnOn) {
+                        addLog("✅ 目標網站只看到 VPN 的 IP，你的真實身分及位置已隱藏。", "success");
+                    } else {
+                        addLog("❌ 目標網站記錄了你的【真實IP】及地理位置。", "warning");
+                    }
+                }, 5500);
+
+                setTimeout(() => {
+                    // End
+                    setPacketState(prev => ({ ...prev, visible: false }));
+                    setIsSending(false);
+                    addLog("傳輸完成。", "info");
+                }, 7500);
+            };
+
+            return (
+                <div className="min-h-screen p-4 md:p-8 max-w-6xl mx-auto flex flex-col gap-8">
+                    {/* Header */}
+                    <header className="text-center space-y-4">
+                        <h1 className="text-3xl md:text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-emerald-400">
+                            VPN 是怎麼實現的？
+                        </h1>
+                        <p className="text-slate-400 text-lg max-w-2xl mx-auto">
+                            透過這個互動模擬器，了解虛擬私人網路 (VPN) 如何加密您的數據、隱藏您的 IP，並保護您的線上隱私。
+                        </p>
+                    </header>
+
+                    {/* Controls & Simulator */}
+                    <div className="bg-slate-800 rounded-2xl p-6 shadow-2xl border border-slate-700">
+                        {/* Control Panel */}
+                        <div className="flex flex-col md:flex-row justify-between items-center mb-10 gap-4">
+                            <div className="flex items-center gap-4 bg-slate-900 p-3 rounded-lg border border-slate-700">
+                                <span className="font-semibold text-slate-300">VPN 狀態：</span>
+                                <button 
+                                    onClick={toggleVpn}
+                                    disabled={isSending}
+                                    className={`relative inline-flex h-8 w-14 items-center rounded-full transition-colors focus:outline-none ${isVpnOn ? 'bg-green-500' : 'bg-slate-600'} ${isSending ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                >
+                                    <span className={`inline-block h-6 w-6 transform rounded-full bg-white transition-transform ${isVpnOn ? 'translate-x-7' : 'translate-x-1'}`} />
+                                </button>
+                                <span className={isVpnOn ? 'text-green-400 font-bold' : 'text-slate-500'}>
+                                    {isVpnOn ? '已連線 (安全)' : '已斷線 (不安全)'}
+                                </span>
+                            </div>
+                            
+                            <button 
+                                onClick={sendData} 
+                                disabled={isSending}
+                                className={`px-6 py-3 rounded-lg font-bold shadow-lg transition-all flex items-center gap-2
+                                    ${isSending 
+                                        ? 'bg-slate-600 text-slate-400 cursor-not-allowed' 
+                                        : 'bg-blue-600 hover:bg-blue-500 text-white hover:shadow-blue-500/20'}`}
+                            >
+                                <svg className={`w-5 h-5 ${isSending ? 'animate-spin' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    {isSending ? (
+                                        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                                    ) : (
+                                        <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
+                                    )}
+                                </svg>
+                                {isSending ? '數據傳輸中...' : '發送測試數據'}
+                            </button>
+                        </div>
+
+                        {/* Interactive Canvas */}
+                        <div className="relative w-full overflow-x-auto pb-8">
+                            <div className="min-w-[700px] h-64 relative bg-slate-900 rounded-xl border border-slate-700 flex items-center justify-between px-10">
+                                
+                                {/* Background Lines */}
+                                <svg className="absolute inset-0 w-full h-full pointer-events-none" preserveAspectRatio="none">
+                                    {/* Default Public Internet Line */}
+                                    <line x1="10%" y1="50%" x2="90%" y2="50%" stroke="#334155" strokeWidth="4" />
+                                    
+                                    {/* VPN Encrypted Tunnel Line */}
+                                    {isVpnOn && (
+                                        <line x1="10%" y1="50%" x2="65%" y2="50%" stroke="#22c55e" strokeWidth="8" strokeOpacity="0.3" className="tunnel-line" />
+                                    )}
+                                    {isVpnOn && (
+                                        <line x1="10%" y1="50%" x2="65%" y2="50%" stroke="#4ade80" strokeWidth="2" strokeDasharray="5,5" className="tunnel-line" />
+                                    )}
+                                </svg>
+
+                                {/* Nodes */}
+                                <div className="z-10 flex flex-col items-center gap-2 w-20">
+                                    <div className="bg-slate-800 p-4 rounded-full border-2 border-slate-600 shadow-lg">
+                                        <UserIcon />
+                                    </div>
+                                    <span className="text-sm font-semibold text-center">你的設備</span>
+                                    <span className="text-xs text-slate-400">114.32.X.X</span>
+                                </div>
+
+                                <div className="z-10 flex flex-col items-center gap-2 w-20">
+                                    <div className="bg-slate-800 p-4 rounded-full border-2 border-slate-600 shadow-lg">
+                                        <ISPIcon />
+                                    </div>
+                                    <span className="text-sm font-semibold text-center">網路供應商<br/>(中華電信等)</span>
+                                </div>
+
+                                <div className="z-10 flex flex-col items-center gap-2 w-24">
+                                    {isVpnOn ? (
+                                        <div className="bg-green-900/50 p-4 rounded-full border-2 border-green-500 shadow-[0_0_15px_rgba(34,197,94,0.4)] relative">
+                                            <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-xs bg-green-500 text-green-950 px-2 py-1 rounded font-bold whitespace-nowrap">解密與偽裝IP</div>
+                                            <VPNIcon />
+                                        </div>
+                                    ) : (
+                                        <div className="bg-red-900/30 p-4 rounded-full border-2 border-red-500 shadow-[0_0_15px_rgba(239,68,68,0.2)] relative">
+                                            <div className="absolute -top-8 left-1/2 -translate-x-1/2 text-xs bg-red-500 text-white px-2 py-1 rounded font-bold whitespace-nowrap">潛在駭客/監聽者</div>
+                                            <HackerIcon />
+                                        </div>
+                                    )}
+                                    <span className="text-sm font-semibold text-center">
+                                        {isVpnOn ? 'VPN 伺服器' : '公共網際網路'}
+                                    </span>
+                                    {isVpnOn && <span className="text-xs text-green-400">198.51.X.X</span>}
+                                </div>
+
+                                <div className="z-10 flex flex-col items-center gap-2 w-20">
+                                    <div className="bg-slate-800 p-4 rounded-full border-2 border-slate-600 shadow-lg relative">
+                                        <TargetIcon />
+                                    </div>
+                                    <span className="text-sm font-semibold text-center">目標網站</span>
+                                </div>
+
+                                {/* Animated Packet */}
+                                <div 
+                                    className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 z-20 packet-transition flex flex-col items-center
+                                        ${packetState.visible ? 'opacity-100' : 'opacity-0'}`}
+                                    style={{ left: `${packetState.position}%` }}
+                                >
+                                    <div className={`p-2 rounded-lg border-2 shadow-xl flex items-center gap-2
+                                        ${packetState.isEncrypted ? 'bg-green-600 border-green-400 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                                    >
+                                        {packetState.isEncrypted ? <LockIcon /> : <FileIcon />}
+                                        <span className="text-sm font-bold w-16 text-center truncate">
+                                            {packetState.isEncrypted ? '****@&#' : 'Hi!'}
+                                        </span>
+                                    </div>
+                                    <div className="mt-2 bg-slate-800 text-xs px-2 py-1 rounded-md border border-slate-600 shadow text-slate-300 whitespace-nowrap">
+                                        來源 IP: {packetState.ip}
+                                    </div>
+                                </div>
+
+                            </div>
+                        </div>
+
+                        {/* Logs Panel */}
+                        <div className="mt-6 bg-slate-900 rounded-xl border border-slate-700 overflow-hidden">
+                            <div className="bg-slate-800 px-4 py-2 border-b border-slate-700 font-semibold text-sm flex items-center gap-2 text-slate-300">
+                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                                傳輸日誌 (Terminal)
+                            </div>
+                            <div className="p-4 h-48 overflow-y-auto space-y-2 font-mono text-sm">
+                                {logs.length === 0 && <div className="text-slate-500 italic">等待操作... 點擊「發送測試數據」開始。</div>}
+                                {logs.map((log, index) => (
+                                    <div key={index} className={`flex gap-3 
+                                        ${log.type === 'error' ? 'text-red-400' : 
+                                          log.type === 'success' ? 'text-green-400' : 
+                                          log.type === 'warning' ? 'text-yellow-400' : 'text-slate-300'}`}
+                                    >
+                                        <span className="opacity-50 flex-shrink-0">[{log.time}]</span>
+                                        <span>{log.msg}</span>
+                                    </div>
+                                ))}
+                                {/* Dummy div to scroll to bottom could be added here */}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Explanatory Text */}
+                    <div className="grid md:grid-cols-3 gap-6 text-slate-300">
+                        <div className="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                            <div className="bg-blue-500/20 w-12 h-12 rounded-lg flex items-center justify-center text-blue-400 mb-4">
+                                <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            </div>
+                            <h3 className="text-xl font-bold text-white mb-2">1. 資料加密 (Encryption)</h3>
+                            <p className="text-sm leading-relaxed text-slate-400">
+                                在開啟 VPN 的情況下，您的設備會先將所有要傳送的數據打包並「上鎖」（例如使用軍用級 AES-256 加密）。這樣一來，即使數據在傳輸過程中被駭客或電信商 (ISP) 攔截，他們看到的也只是一堆毫無意義的亂碼。
+                            </p>
+                        </div>
+                        <div className="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                            <div className="bg-emerald-500/20 w-12 h-12 rounded-lg flex items-center justify-center text-emerald-400 mb-4">
+                                <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                            </div>
+                            <h3 className="text-xl font-bold text-white mb-2">2. 專屬隧道 (Tunneling)</h3>
+                            <p className="text-sm leading-relaxed text-slate-400">
+                                VPN 就像在混亂的公共網際網路中，為您開鑿了一條私密的地底隧道。您的數據只會在這條隧道內部傳輸，外部的人無法窺探隧道內發生了什麼事，有效隔離了公共 Wi-Fi 常見的安全風險。
+                            </p>
+                        </div>
+                        <div className="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                            <div className="bg-purple-500/20 w-12 h-12 rounded-lg flex items-center justify-center text-purple-400 mb-4">
+                                <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                            </div>
+                            <h3 className="text-xl font-bold text-white mb-2">3. IP 偽裝 (IP Masking)</h3>
+                            <p className="text-sm leading-relaxed text-slate-400">
+                                VPN 伺服器充當您的「代理人」。當它收到您的加密數據後，會將其解密並代為發送給目標網站。因此，目標網站記錄到的存取者 IP 和地理位置，都會是 VPN 伺服器的資訊，而不是您真實的資訊，從而實現匿名上網或跨區訪問。
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
