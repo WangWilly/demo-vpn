@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VPN 偽裝與防火牆檢測</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        body { font-family: 'Inter', 'Segoe UI', sans-serif; background-color: #050505; color: #e5e5e5; }
+        
+        /* 封包動畫軌道 */
+        .packet-track { position: relative; overflow: hidden; background: repeating-linear-gradient(90deg, #111, #111 10px, #1a1a1a 10px, #1a1a1a 20px); }
+        
+        /* 移動的封包 */
+        .packet { position: absolute; top: 50%; transform: translateY(-50%); width: 20px; height: 12px; border-radius: 3px; box-shadow: 0 0 8px currentColor; animation: movePacket 3s linear infinite; }
+        .packet:nth-child(1) { animation-delay: 0.0s; }
+        .packet:nth-child(2) { animation-delay: 0.6s; }
+        .packet:nth-child(3) { animation-delay: 1.2s; }
+        .packet:nth-child(4) { animation-delay: 1.8s; }
+        .packet:nth-child(5) { animation-delay: 2.4s; }
+
+        @keyframes movePacket { 0% { left: -5%; opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { left: 105%; opacity: 0; } }
+
+        /* 防火牆阻擋動畫 */
+        .packet.blocked { animation: movePacketBlocked 3s linear infinite; }
+        .packet.blocked:nth-child(1) { animation-delay: 0.0s; }
+        .packet.blocked:nth-child(2) { animation-delay: 0.6s; }
+        .packet.blocked:nth-child(3) { animation-delay: 1.2s; }
+        
+        @keyframes movePacketBlocked { 
+            0% { left: -5%; opacity: 0; } 
+            10% { opacity: 1; } 
+            48% { left: 45%; opacity: 1; transform: translateY(-50%) scale(1); } 
+            50% { left: 45%; opacity: 0; transform: translateY(-50%) scale(2); box-shadow: 0 0 20px red; background-color: red;} 
+            100% { left: 45%; opacity: 0; } 
+        }
+
+        /* 掃描線 */
+        .scanner-line { position: absolute; left: 48%; top: 0; bottom: 0; width: 4%; background: linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.5), transparent); z-index: 10; animation: scanPulse 1s infinite alternate; }
+        @keyframes scanPulse { from { opacity: 0.3; } to { opacity: 1; box-shadow: 0 0 15px rgba(59, 130, 246, 0.8); } }
+
+        /* 偽裝粒子 */
+        .obfs-particle { position: absolute; inset: -2px; border-radius: inherit; border: 1px dashed rgba(255,255,255,0.5); animation: spin 4s linear infinite; }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #000; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        // --- Icons ---
+        const ShieldAlert = () => <svg className="w-8 h-8 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>;
+        const ShieldCheck = () => <svg className="w-8 h-8 text-green-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>;
+        const SearchIcon = () => <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>;
+        const DpiIcon = () => <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>;
+
+        const profiles = {
+            standard: {
+                id: 'standard',
+                name: "標準 OpenVPN",
+                desc: "未經偽裝的傳統 VPN 協定",
+                port: "UDP 1194",
+                signature: "發現 OpenVPN 特徵碼 (0x38)",
+                handshake: "非標準 TLS",
+                entropy: "高 (加密內容)",
+                sni: "無",
+                firewallAction: "block",
+                packetColor: "text-orange-500 bg-orange-500",
+                log: "阻擋原因：直接匹配到已知 VPN 協定的封包標頭特徵。防火牆輕易識別。"
+            },
+            https: {
+                id: 'https',
+                name: "正常 HTTPS 網頁",
+                desc: "一般瀏覽網站的加密流量",
+                port: "TCP 443",
+                signature: "標準 TLS 1.3 特徵",
+                handshake: "Client Hello -> Server Hello",
+                entropy: "高 (網頁內容加密)",
+                sni: "www.wikipedia.org",
+                firewallAction: "allow",
+                packetColor: "text-blue-500 bg-blue-500",
+                log: "放行原因：標準的網頁瀏覽行為，連線埠口與握手協定均符合規範。"
+            },
+            obfuscated: {
+                id: 'obfuscated',
+                name: "偽裝 VPN (Obfsproxy/Stunnel)",
+                desc: "將 VPN 流量包裝成 HTTPS",
+                port: "TCP 443",
+                signature: "完美模擬 TLS 1.3 特徵",
+                handshake: "偽裝的 Client Hello",
+                entropy: "極高 (加密再加密)",
+                sni: "www.aws.com (偽裝)",
+                firewallAction: "suspicious",
+                packetColor: "text-green-400 bg-green-400",
+                log: "放行但標記可疑：深度封包檢測 (DPI) 認為這是正常 HTTPS。但進階機器學習可能會發現流量大小與時間間隔呈現「非典型網頁瀏覽」特徵。"
+            }
+        };
+
+        const App = () => {
+            const [activeProfile, setActiveProfile] = useState(profiles.https);
+            const [isScanning, setIsScanning] = useState(true);
+
+            const handleProfileChange = (key) => {
+                setIsScanning(false);
+                setActiveProfile(profiles[key]);
+                // Reset animation trigger
+                setTimeout(() => setIsScanning(true), 50);
+            };
+
+            const isBlocked = activeProfile.firewallAction === 'block';
+
+            return (
+                <div className="min-h-screen p-4 md:p-8 max-w-6xl mx-auto space-y-12">
+                    {/* Header */}
+                    <header className="text-center space-y-4 pt-8">
+                        <h1 className="text-3xl md:text-5xl font-bold text-white">
+                            VPN 如何逃過 <span className="text-red-500">防火牆</span> 的眼睛？
+                        </h1>
+                        <p className="text-gray-400 max-w-2xl mx-auto text-lg">
+                            現代網路審查系統使用「深度封包檢測 (DPI)」來封鎖 VPN。了解 VPN 協定如何將自己偽裝成一般的 HTTPS 網頁流量來突破封鎖。
+                        </p>
+                    </header>
+
+                    {/* Interactive Simulator */}
+                    <div className="bg-neutral-900 rounded-2xl border border-neutral-800 shadow-2xl overflow-hidden">
+                        {/* Top Controls */}
+                        <div className="grid grid-cols-1 md:grid-cols-3 bg-neutral-950 border-b border-neutral-800 p-2">
+                            {Object.entries(profiles).map(([key, profile]) => (
+                                <button
+                                    key={key}
+                                    onClick={() => handleProfileChange(key)}
+                                    className={`p-4 text-left transition-all rounded-xl ${activeProfile.id === key ? 'bg-neutral-800 ring-1 ring-neutral-700 shadow-inner' : 'hover:bg-neutral-900 text-gray-500'}`}
+                                >
+                                    <div className={`font-bold ${activeProfile.id === key ? 'text-white' : ''}`}>{profile.name}</div>
+                                    <div className="text-xs mt-1">{profile.desc}</div>
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Visualizer Area */}
+                        <div className="relative h-64 md:h-80 packet-track flex items-center justify-between px-10">
+                            {/* DPI Firewall Element */}
+                            <div className="absolute left-1/2 -translate-x-1/2 z-20 flex flex-col items-center">
+                                <div className={`w-32 h-40 border-y-4 border-x border-dashed bg-black/50 backdrop-blur-sm flex flex-col items-center justify-center relative transition-colors duration-500
+                                    ${activeProfile.firewallAction === 'block' ? 'border-red-500 shadow-[0_0_30px_rgba(239,68,68,0.3)]' : 
+                                      activeProfile.firewallAction === 'allow' ? 'border-blue-500 shadow-[0_0_30px_rgba(59,130,246,0.2)]' : 
+                                      'border-yellow-500 shadow-[0_0_30px_rgba(234,179,8,0.2)]'}`}>
+                                    <DpiIcon className={`mb-2 ${activeProfile.firewallAction === 'block' ? 'text-red-500' : activeProfile.firewallAction === 'allow' ? 'text-blue-500' : 'text-yellow-500'}`} />
+                                    <span className="font-bold tracking-widest text-sm text-white">DPI 引擎</span>
+                                    <div className="scanner-line"></div>
+                                </div>
+                                <div className="mt-4 flex items-center gap-2 bg-neutral-950 px-4 py-2 rounded-full border border-neutral-800 shadow-lg">
+                                    {activeProfile.firewallAction === 'block' && <><ShieldAlert /><span className="text-red-500 font-bold">封鎖 (DROP)</span></>}
+                                    {activeProfile.firewallAction === 'allow' && <><ShieldCheck /><span className="text-blue-500 font-bold">放行 (ACCEPT)</span></>}
+                                    {activeProfile.firewallAction === 'suspicious' && <><ShieldCheck className="text-yellow-500" /><span className="text-yellow-500 font-bold">放行並監控</span></>}
+                                </div>
+                            </div>
+
+                            {/* Client & Server visual anchors */}
+                            <div className="z-10 text-center">
+                                <div className="text-4xl mb-2">💻</div>
+                                <div className="text-xs text-gray-400 font-mono">您的設備</div>
+                            </div>
+                            <div className="z-10 text-center">
+                                <div className="text-4xl mb-2">🌍</div>
+                                <div className="text-xs text-gray-400 font-mono">網際網路</div>
+                            </div>
+
+                            {/* Packets Animation */}
+                            {isScanning && (
+                                <div className="absolute inset-0 pointer-events-none">
+                                    {[...Array(5)].map((_, i) => (
+                                        <div key={i} className={`packet ${activeProfile.packetColor} ${isBlocked ? 'blocked' : ''}`}>
+                                            {activeProfile.id === 'obfuscated' && <div className="obfs-particle"></div>}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Analysis Dashboard */}
+                        <div className="grid md:grid-cols-2">
+                            {/* DPI View */}
+                            <div className="p-6 bg-black border-r border-neutral-800">
+                                <h3 className="text-sm text-gray-400 font-bold uppercase tracking-wider mb-4 flex items-center gap-2">
+                                    <SearchIcon /> 深度封包檢測分析器 (DPI)
+                                </h3>
+                                <ul className="space-y-4 font-mono text-sm">
+                                    <li className="flex justify-between border-b border-neutral-800 pb-2">
+                                        <span className="text-gray-500">傳輸埠口 (Port)</span>
+                                        <span className={activeProfile.port.includes('443') ? 'text-green-400' : 'text-red-400'}>{activeProfile.port}</span>
+                                    </li>
+                                    <li className="flex justify-between border-b border-neutral-800 pb-2">
+                                        <span className="text-gray-500">交握特徵 (Handshake)</span>
+                                        <span className="text-right max-w-[60%]">{activeProfile.handshake}</span>
+                                    </li>
+                                    <li className="flex justify-between border-b border-neutral-800 pb-2">
+                                        <span className="text-gray-500">封包標頭特徵</span>
+                                        <span className={activeProfile.id === 'standard' ? 'text-red-400 font-bold' : 'text-white'}>{activeProfile.signature}</span>
+                                    </li>
+                                    <li className="flex justify-between border-b border-neutral-800 pb-2">
+                                        <span className="text-gray-500">內容熵值 (Entropy)</span>
+                                        <span>{activeProfile.entropy}</span>
+                                    </li>
+                                    <li className="flex justify-between pb-2">
+                                        <span className="text-gray-500">SNI (伺服器名稱指示)</span>
+                                        <span>{activeProfile.sni}</span>
+                                    </li>
+                                </ul>
+                            </div>
+
+                            {/* Firewall Decision Log */}
+                            <div className="p-6 bg-neutral-900/50 flex flex-col justify-center">
+                                <h3 className="text-sm text-gray-400 font-bold uppercase tracking-wider mb-4">防火牆決策日誌</h3>
+                                <div className={`p-4 rounded-xl border ${
+                                    activeProfile.firewallAction === 'block' ? 'bg-red-950/30 border-red-900/50 text-red-200' :
+                                    activeProfile.firewallAction === 'allow' ? 'bg-blue-950/30 border-blue-900/50 text-blue-200' :
+                                    'bg-yellow-950/30 border-yellow-900/50 text-yellow-200'
+                                }`}>
+                                    <p className="leading-relaxed">{activeProfile.log}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Explanatory Articles */}
+                    <div className="grid md:grid-cols-2 gap-8 text-gray-300">
+                        {/* Part 1: How Camouflage Works */}
+                        <div className="bg-neutral-900 p-6 md:p-8 rounded-2xl border border-neutral-800 shadow-lg relative overflow-hidden">
+                            <div className="absolute top-0 right-0 w-32 h-32 bg-green-500/10 rounded-full blur-3xl"></div>
+                            <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3">
+                                🎭 偽裝技術 (Obfuscation) 是怎麼做到的？
+                            </h2>
+                            <div className="space-y-6 text-sm leading-relaxed text-gray-400">
+                                <div>
+                                    <h4 className="text-green-400 font-bold text-base mb-1">1. TLS / SSL 包裝 (例如 Stunnel)</h4>
+                                    <p>
+                                        防火牆 (GFW) 通常不會封鎖 HTTPS (TCP Port 443)，因為這會導致整個國家無法瀏覽一般網站。偽裝軟體（如 Stunnel 或 Shadowsocks 的外掛）會在原本的 VPN 封包外面，<strong className="text-white">再包上一層標準的 TLS 加密外衣</strong>。
+                                        對防火牆來說，它看起來就像是使用者在瀏覽一個普通的加密網頁，完全看不到裡面的 OpenVPN 標頭。
+                                    </p>
+                                </div>
+                                <div>
+                                    <h4 className="text-green-400 font-bold text-base mb-1">2. 握手欺騙與 SNI 偽裝</h4>
+                                    <p>
+                                        在建立加密連線的初期（TLS Handshake），用戶端會發送明文的 SNI (Server Name Indication) 告訴伺服器它想訪問哪個網域。偽裝技術會刻意把 SNI 填成「無害且常用」的網域（例如 <code className="bg-black px-1 rounded">microsoft.com</code> 或 CDN 節點），讓防火牆誤以為這是一次正常的合法訪問，從而放行連線。
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Part 2: How DPI Detects it */}
+                        <div className="bg-neutral-900 p-6 md:p-8 rounded-2xl border border-neutral-800 shadow-lg relative overflow-hidden">
+                            <div className="absolute top-0 right-0 w-32 h-32 bg-red-500/10 rounded-full blur-3xl"></div>
+                            <h2 className="text-2xl font-bold text-white mb-6 flex items-center gap-3">
+                                👁️ 防火牆如何識破偽裝？
+                            </h2>
+                            <div className="space-y-6 text-sm leading-relaxed text-gray-400">
+                                <div>
+                                    <h4 className="text-red-400 font-bold text-base mb-1">1. 主動探測 (Active Probing)</h4>
+                                    <p>
+                                        這是進階防火牆最厲害的武器。當防火牆發現一個「看起來像 HTTPS，但感覺怪怪的」連線時，防火牆的伺服器會<strong className="text-white">主動向該目的地 IP 發送一些隨機的、或者構造錯誤的資料包</strong>。
+                                        如果是真的網站伺服器，會回傳標準的 HTML 錯誤碼 (如 400 Bad Request)。但如果是偽裝的 VPN 伺服器，它可能無法理解這些垃圾數據而選擇「直接斷開連線」或「不回應」。防火牆藉由這種異常反應，就能斷定這是一台偽裝伺服器並將其 IP 封鎖。
+                                    </p>
+                                </div>
+                                <div>
+                                    <h4 className="text-red-400 font-bold text-base mb-1">2. 流量特徵分析與機器學習</h4>
+                                    <p>
+                                        即使內容被完美加密，<strong className="text-white">封包的大小和時間間隔依然會洩露秘密</strong>。瀏覽網頁是「爆發性」的（下載一堆圖片，然後使用者閱讀暫停）；而觀看影片是「持續大流量下載」。
+                                        VPN 為了轉發內部的網路請求，其封包的長度和雙向傳輸的頻率與一般網頁截然不同。現代審查系統利用機器學習模型，分析這些純粹的統計學特徵，就能以極高的準確率揪出隱藏在 HTTPS 流量中的 VPN 連線。
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
